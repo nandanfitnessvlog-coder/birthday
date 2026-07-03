@@ -2,6 +2,40 @@
    Birthday Surprise Website - Premium JS Logic
    ========================================================================== */
 
+// Prevent Chrome deprecation warnings for DOMNodeInsertedIntoDocument by emulating it via MutationObserver if added
+(function() {
+    const legacyEvents = ['DOMNodeInserted', 'DOMNodeInsertedIntoDocument', 'DOMSubtreeModified'];
+    const originalAddEventListener = EventTarget.prototype.addEventListener;
+    
+    EventTarget.prototype.addEventListener = function(type, listener, options) {
+        if (legacyEvents.includes(type)) {
+            const target = this;
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    if (type === 'DOMSubtreeModified') {
+                        const event = new Event('DOMSubtreeModified');
+                        listener.call(target, event);
+                    } else {
+                        mutation.addedNodes.forEach((node) => {
+                            const event = new CustomEvent(type, { bubbles: true, cancelable: false });
+                            Object.defineProperty(event, 'target', { value: node, enumerable: true });
+                            Object.defineProperty(event, 'srcElement', { value: node, enumerable: true });
+                            listener.call(target, event);
+                        });
+                    }
+                });
+            });
+            
+            observer.observe(target === window ? document.documentElement : target, {
+                childList: true,
+                subtree: true
+            });
+            return;
+        }
+        return originalAddEventListener.apply(this, arguments);
+    };
+})();
+
 document.addEventListener('DOMContentLoaded', () => {
     
     // --- State & Configurations ---
@@ -109,6 +143,31 @@ document.addEventListener('DOMContentLoaded', () => {
             const currentVol = playerVolume ? (playerVolume.value / 100) : 0.4;
             fadeAudio(backgroundMusic, currentVol, 400); // Restore original volume
         }
+    }
+
+    // Smoothly transition the audio volume over a set duration
+    function fadeAudio(audio, targetVolume, duration) {
+        if (!audio) return;
+        const startVolume = audio.volume;
+        const diff = targetVolume - startVolume;
+        if (diff === 0) return;
+        const steps = 20;
+        const stepTime = duration / steps;
+        let step = 0;
+        
+        if (audio._fadeInterval) {
+            clearInterval(audio._fadeInterval);
+        }
+        
+        audio._fadeInterval = setInterval(() => {
+            step++;
+            const newVol = startVolume + (diff * (step / steps));
+            audio.volume = Math.max(0, Math.min(1, newVol));
+            if (step >= steps) {
+                clearInterval(audio._fadeInterval);
+                audio._fadeInterval = null;
+            }
+        }, stepTime);
     }
 
     // --- Web Audio API Synth Sound Effects ---
@@ -1689,18 +1748,13 @@ target.style.unicodeBidi = '';
         }
     });
 
-    const initialWishes = [
-        { name: "Ayesha (Bestie)", message: "Happy 21st Milestone, Zoha! So grateful for all our late-night tea talks, study sessions, and endless laughter. You are an absolute star!" },
-        { name: "Mom & Dad", message: "Wishing our dearest Zoha a blessed and happy 21st birthday. May your life be filled with constant joy, peace, and endless success." },
-        { name: "Zain (Cousin)", message: "Happy Birthday! May your day be filled with warm celebrations and may all your code compile perfectly on the first run!" },
-        { name: "Yousef", message: "To an amazing friend, wishing you a fantastic 21st! Keep shining bright and dreaming big. Have an incredible year ahead!" }
-    ];
+    const initialWishes = [];
 
     function loadWishes() {
         // One-time clear of legacy mock wishes to start fresh
-        if (localStorage.getItem(wishesKey + '_fresh_v1') !== 'true') {
+        if (localStorage.getItem(wishesKey + '_fresh_v2') !== 'true') {
             localStorage.removeItem(wishesKey);
-            localStorage.setItem(wishesKey + '_fresh_v1', 'true');
+            localStorage.setItem(wishesKey + '_fresh_v2', 'true');
         }
 
         let stored = localStorage.getItem(wishesKey);

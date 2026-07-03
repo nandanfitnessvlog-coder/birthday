@@ -2535,6 +2535,27 @@ select:focus {
         height: 45px;
         font-size: 1.8rem;
     }
+    
+    /* Narration panel overrides for tablet/small screens */
+    .narration-panel {
+        padding: 6px 12px;
+        margin-bottom: 10px;
+        gap: 8px;
+    }
+    .narration-label {
+        font-size: 0.65rem;
+    }
+    .narration-status {
+        font-size: 0.6rem;
+    }
+    .narration-btn {
+        width: 24px;
+        height: 24px;
+    }
+    .narration-btn svg {
+        width: 12px;
+        height: 12px;
+    }
 }
 
 @media (max-width: 480px) {
@@ -2596,6 +2617,27 @@ select:focus {
     
     .wish-card-author {
         font-size: 0.75rem;
+    }
+    
+    /* Narration panel overrides for mobile screens */
+    .narration-panel {
+        padding: 5px 10px;
+        margin-bottom: 8px;
+        gap: 6px;
+    }
+    .narration-label {
+        font-size: 0.6rem;
+    }
+    .narration-status {
+        font-size: 0.55rem;
+    }
+    .narration-btn {
+        width: 22px;
+        height: 22px;
+    }
+    .narration-btn svg {
+        width: 10px;
+        height: 10px;
     }
 }
 
@@ -2762,6 +2804,14 @@ html[dir="rtl"] .timeline-right .timeline-card::before {
     opacity: 0.85;
 }
 
+.narration-text-container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    flex: 1;
+}
+
 .narration-label {
     font-family: var(--font-body);
     font-size: 0.72rem;
@@ -2830,11 +2880,12 @@ html[dir="rtl"] .timeline-right .timeline-card::before {
     letter-spacing: 0.03em;
     font-style: italic;
     white-space: nowrap;
-    flex-shrink: 0;
-    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 120px;
+}
+
+.narration-status:empty {
+    display: none;
 }
 
 /* ── Word highlight during narration ────────────────────────────────────── */
