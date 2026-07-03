@@ -71,6 +71,46 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerTimeCurrent = document.getElementById('player-time-current');
     const playerTimeDuration = document.getElementById('player-time-duration');
 
+    // --- Global SpeechSynthesis & Voice Configuration ---
+    let voiceList = [];
+    const synth = window.speechSynthesis;
+    function loadVoices() {
+        if ('speechSynthesis' in window) {
+            voiceList = synth.getVoices();
+        }
+    }
+    loadVoices();
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis.onvoiceschanged !== undefined) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+
+    function pickVoice(langCode) {
+        if (voiceList.length === 0) loadVoices();
+        const lang2 = langCode.split('-')[0].toLowerCase();
+        // 1. Exact match
+        let v = voiceList.find(v => v.lang.toLowerCase() === langCode.toLowerCase());
+        // 2. Prefix match
+        if (!v) v = voiceList.find(v => v.lang.toLowerCase().startsWith(lang2));
+        // 3. Fallback
+        if (!v) v = voiceList.find(v => v.default) || voiceList[0] || null;
+        return v;
+    }
+
+    // --- Background Music Volume Ducking Helpers ---
+    function duckBackgroundMusic() {
+        if (backgroundMusic && !isMuted) {
+            const currentVol = playerVolume ? (playerVolume.value / 100) : 0.4;
+            fadeAudio(backgroundMusic, currentVol * 0.15, 400); // Duck to 15% of current volume
+        }
+    }
+
+    function unduckBackgroundMusic() {
+        if (backgroundMusic && !isMuted) {
+            const currentVol = playerVolume ? (playerVolume.value / 100) : 0.4;
+            fadeAudio(backgroundMusic, currentVol, 400); // Restore original volume
+        }
+    }
+
     // --- Web Audio API Synth Sound Effects ---
     function initAudioContext() {
         if (!audioContext) {
@@ -261,15 +301,12 @@ document.addEventListener('DOMContentLoaded', () => {
         isMuted = !isMuted;
         backgroundMusic.muted = isMuted;
         
-        // Mute all narration tracks together with background music
-        const narrationAudios = document.querySelectorAll('.section-narration');
-        narrationAudios.forEach(aud => {
-            aud.muted = isMuted;
-        });
-        
         if (isMuted) {
             if (playerUnmutedIcon) playerUnmutedIcon.classList.add('hidden');
             if (playerMutedIcon) playerMutedIcon.classList.remove('hidden');
+            // Cancel active narration
+            if (typeof window._stopNarration === 'function') window._stopNarration();
+            if (typeof window._stopScrollNarration === 'function') window._stopScrollNarration();
         } else {
             if (playerUnmutedIcon) playerUnmutedIcon.classList.remove('hidden');
             if (playerMutedIcon) playerMutedIcon.classList.add('hidden');
@@ -963,27 +1000,14 @@ document.addEventListener('DOMContentLoaded', () => {
             // Reset explicit direction styles on cancel/restart
             target.style.direction   = '';
             target.style.textAlign   = '';
-            target.style.unicodeBidi = '';
+target.style.unicodeBidi = '';
         }
     }
 
     // Global bridge so the i18n IIFE can restart the typewriter
-    // (needed because startLetterTypewriter lives inside a closure)
-    window._restartTypewriter = function () {
-        cancelLetterTypewriter();
-        // Small delay so cancelLetterTypewriter finishes clearing the DOM
-        // before startLetterTypewriter reads the (now-updated) html[lang]
-        setTimeout(startLetterTypewriter, 120);
-    };
-
-    /* ========================================================================
-       Voice Narration Engine — SpeechSynthesis API
-       Only starts on explicit user gesture. Highlights words as spoken.
-       Falls back gracefully if no suitable voice is available.
-    ======================================================================== */
     (function initNarration() {
 
-        if (!('speechSynthesis' in window)) return; // API not supported
+        if (!('speechSynthesis' in window) && !window.Audio) return; // API not supported
 
         const synth       = window.speechSynthesis;
         const playBtn     = document.getElementById('narration-play');
@@ -995,34 +1019,254 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!playBtn || !stopBtn) return;
 
-        let utterance   = null;
         let isPlaying   = false;
         let isPaused    = false;
-        let voiceList   = [];
+        let offsetMap   = [];
+        let lastHighlight = null;
 
-        // ── Collect voices (may fire async on some browsers) ─────────────────
-        function loadVoices() {
-            voiceList = synth.getVoices();
-        }
-        loadVoices();
-        if (synth.onvoiceschanged !== undefined) {
-            synth.onvoiceschanged = loadVoices;
-        }
+        // --- Hybrid Speech Player Engine ---
+        const SpeechPlayer = {
+            audioElement: null,
+            nativeUtterance: null,
+            isPlaying: false,
+            isPaused: false,
+            currentText: '',
+            currentLang: 'en',
+            useGoogleFallback: false,
+            googleChunks: [],
+            currentChunkIndex: 0,
+            highlightTimer: null,
+            cumulativeCharOffset: 0,
+            
+            speak: function(text, lang, onStart, onEnd, onError) {
+                this.cancel();
+                this.currentText = text;
+                this.currentLang = lang;
+                
+                const langCode = lang === 'ar' ? 'ar-SA' : 'en-US';
+                const altCode = lang === 'ar' ? 'ar-EG' : 'en-GB';
+                
+                let voice = pickVoice(langCode) || pickVoice(altCode);
+                const usingFallback = (lang === 'ar' && voice && !voice.lang.toLowerCase().startsWith('ar'));
+                const noArabicVoice = (lang === 'ar' && (!voice || usingFallback));
+                
+                if (noArabicVoice || !('speechSynthesis' in window)) {
+                    this.useGoogleFallback = true;
+                    this.speakGoogle(text, lang, onStart, onEnd, onError);
+                } else {
+                    this.useGoogleFallback = false;
+                    this.speakNative(text, langCode, voice, onStart, onEnd, onError);
+                }
+            },
+            
+            speakNative: function(text, langCode, voice, onStart, onEnd, onError) {
+                this.nativeUtterance = new SpeechSynthesisUtterance(text);
+                this.nativeUtterance.lang = langCode;
+                if (voice) this.nativeUtterance.voice = voice;
+                this.nativeUtterance.rate = this.currentLang === 'ar' ? 0.88 : 0.92;
+                this.nativeUtterance.pitch = 1.0;
+                
+                this.nativeUtterance.onboundary = (e) => {
+                    if (e.name === 'word') {
+                        highlightAt(e.charIndex);
+                    }
+                };
+                
+                this.nativeUtterance.onstart = () => {
+                    this.isPlaying = true;
+                    this.isPaused = false;
+                    duckBackgroundMusic();
+                    if (onStart) onStart();
+                };
+                
+                this.nativeUtterance.onend = () => {
+                    this.isPlaying = false;
+                    this.isPaused = false;
+                    unduckBackgroundMusic();
+                    if (onEnd) onEnd();
+                };
+                
+                this.nativeUtterance.onerror = (e) => {
+                    if (e.error !== 'interrupted' && e.error !== 'canceled') {
+                        console.warn('SpeechSynthesis error:', e.error);
+                    }
+                    this.isPlaying = false;
+                    this.isPaused = false;
+                    unduckBackgroundMusic();
+                    if (onError) onError(e);
+                };
+                
+                synth.speak(this.nativeUtterance);
+            },
+            
+            speakGoogle: function(text, lang, onStart, onEnd, onError) {
+                const sentences = text.match(/[^.!?،؟\n]+[.!?،؟\n]*/g) || [text];
+                this.googleChunks = [];
+                let currentChunk = '';
+                
+                sentences.forEach(sentence => {
+                    if ((currentChunk + sentence).length > 180) {
+                        if (currentChunk.trim()) {
+                            this.googleChunks.push(currentChunk.trim());
+                        }
+                        currentChunk = sentence;
+                    } else {
+                        currentChunk += sentence;
+                    }
+                });
+                if (currentChunk.trim()) {
+                    this.googleChunks.push(currentChunk.trim());
+                }
+                
+                if (this.googleChunks.length === 0) {
+                    if (onEnd) onEnd();
+                    return;
+                }
+                
+                this.currentChunkIndex = 0;
+                this.isPlaying = true;
+                this.isPaused = false;
+                this.cumulativeCharOffset = 0;
+                duckBackgroundMusic();
+                setStatus('novoice');
+                if (onStart) onStart();
+                
+                this.playGoogleChunk(onEnd, onError);
+            },
+            
+            playGoogleChunk: function(onEnd, onError) {
+                if (this.currentChunkIndex >= this.googleChunks.length) {
+                    this.isPlaying = false;
+                    this.isPaused = false;
+                    unduckBackgroundMusic();
+                    if (onEnd) onEnd();
+                    return;
+                }
+                
+                const chunkText = this.googleChunks[this.currentChunkIndex];
+                const chunkLang = this.currentLang;
+                const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${chunkLang}&client=tw-ob&q=${encodeURIComponent(chunkText)}`;
+                
+                this.audioElement = new Audio(url);
+                this.audioElement.volume = 1.0;
+                
+                let chunkStartOffset = this.cumulativeCharOffset;
+                
+                const startHighlightLoop = () => {
+                    if (this.highlightTimer) clearInterval(this.highlightTimer);
+                    this.highlightTimer = setInterval(() => {
+                        if (!this.audioElement || this.audioElement.paused) return;
+                        
+                        const duration = this.audioElement.duration || 0;
+                        const currentTime = this.audioElement.currentTime || 0;
+                        if (duration > 0) {
+                            const pct = currentTime / duration;
+                            const estChar = Math.floor(pct * chunkText.length);
+                            highlightAt(chunkStartOffset + estChar);
+                        }
+                    }, 50);
+                };
+                
+                this.audioElement.addEventListener('play', () => {
+                    startHighlightLoop();
+                });
+                
+                this.audioElement.addEventListener('ended', () => {
+                    if (this.highlightTimer) {
+                        clearInterval(this.highlightTimer);
+                        this.highlightTimer = null;
+                    }
+                    this.cumulativeCharOffset += chunkText.length + 1;
+                    this.currentChunkIndex++;
+                    this.playGoogleChunk(onEnd, onError);
+                });
+                
+                this.audioElement.addEventListener('error', (e) => {
+                    console.warn("Google TTS chunk load error:", e);
+                    this.cumulativeCharOffset += chunkText.length + 1;
+                    this.currentChunkIndex++;
+                    this.playGoogleChunk(onEnd, onError);
+                });
+                
+                this.audioElement.play().catch(err => {
+                    console.warn("Google TTS playback blocked or failed:", err);
+                    this.isPlaying = false;
+                    this.isPaused = false;
+                    unduckBackgroundMusic();
+                    if (onError) onError(err);
+                });
+            },
+            
+            pause: function() {
+                if (this.useGoogleFallback) {
+                    if (this.audioElement) {
+                        this.audioElement.pause();
+                        this.isPaused = true;
+                        if (this.highlightTimer) {
+                            clearInterval(this.highlightTimer);
+                            this.highlightTimer = null;
+                        }
+                    }
+                    unduckBackgroundMusic();
+                } else {
+                    if ('speechSynthesis' in window && synth.speaking && !synth.paused) {
+                        synth.pause();
+                        this.isPaused = true;
+                        unduckBackgroundMusic();
+                    }
+                }
+            },
+            
+            resume: function() {
+                if (this.useGoogleFallback) {
+                    if (this.audioElement && this.isPaused) {
+                        duckBackgroundMusic();
+                        this.audioElement.play().then(() => {
+                            this.isPaused = false;
+                        }).catch(err => {
+                            console.warn("Google TTS resume failed:", err);
+                        });
+                    }
+                } else {
+                    if ('speechSynthesis' in window && synth.paused) {
+                        duckBackgroundMusic();
+                        synth.resume();
+                        this.isPaused = false;
+                    }
+                }
+            },
+            
+            cancel: function() {
+                if (this.highlightTimer) {
+                    clearInterval(this.highlightTimer);
+                    this.highlightTimer = null;
+                }
+                
+                if (this.useGoogleFallback) {
+                    if (this.audioElement) {
+                        this.audioElement.pause();
+                        this.audioElement = null;
+                    }
+                } else {
+                    if ('speechSynthesis' in window) {
+                        synth.cancel();
+                    }
+                }
+                
+                this.isPlaying = false;
+                this.isPaused = false;
+                unduckBackgroundMusic();
+            }
+        };
 
-        // ── Pick the best voice for a given lang code ─────────────────────────
-        // Priority: exact locale match → language match → any voice
         function pickVoice(langCode) {
-            const lang2 = langCode.split('-')[0].toLowerCase(); // e.g. "ar"
-            // 1. Exact locale
-            let v = voiceList.find(v => v.lang.toLowerCase() === langCode.toLowerCase());
-            // 2. Prefix match (ar-SA, ar-EG, ar-XB …)
-            if (!v) v = voiceList.find(v => v.lang.toLowerCase().startsWith(lang2));
-            // 3. Default
-            if (!v) v = voiceList.find(v => v.default) || voiceList[0] || null;
+            const lang2 = langCode.split('-')[0].toLowerCase();
+            let v = synth.getVoices().find(v => v.lang.toLowerCase() === langCode.toLowerCase());
+            if (!v) v = synth.getVoices().find(v => v.lang.toLowerCase().startsWith(lang2));
+            if (!v) v = synth.getVoices().find(v => v.default) || synth.getVoices()[0] || null;
             return v;
         }
 
-        // ── Build the full letter text to narrate ─────────────────────────────
         function getLetterText(lang) {
             if (lang === 'ar') {
                 const ar = window._LETTER_AR || {};
@@ -1034,22 +1278,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     ar.names      || '',
                 ].join(' ');
             }
-            // English — read from the hidden DOM source
             const src = document.getElementById('hidden-letter-text');
             return src ? src.textContent.trim().replace(/\s+/g, ' ') : '';
         }
 
-        // ── Sentence highlighting ─────────────────────────────────────────────
-        // We pre-wrap each word in the #typewriter-text into spans so
-        // onboundary can find and highlight them by character offset.
         function wrapWordsForHighlight() {
             const tw = document.getElementById('typewriter-text');
             if (!tw) return;
-            // Walk all text nodes and wrap each word
             function wrapNode(node) {
                 if (node.nodeType === Node.TEXT_NODE) {
                     const frag = document.createDocumentFragment();
-                    // Split preserving spaces
                     const parts = node.textContent.split(/(\s+)/);
                     parts.forEach(part => {
                         if (/\S/.test(part)) {
@@ -1070,7 +1308,6 @@ document.addEventListener('DOMContentLoaded', () => {
             Array.from(tw.childNodes).forEach(wrapNode);
         }
 
-        // Build a flat word-offset map: [{start, end, el}]
         function buildOffsetMap() {
             const tw = document.getElementById('typewriter-text');
             if (!tw) return [];
@@ -1080,16 +1317,12 @@ document.addEventListener('DOMContentLoaded', () => {
             words.forEach(el => {
                 const len = el.textContent.length;
                 map.push({ start: cursor, end: cursor + len, el });
-                cursor += len + 1; // +1 for the space between words
+                cursor += len + 1;
             });
             return map;
         }
 
-        let offsetMap     = [];
-        let lastHighlight = null;
-
         function highlightAt(charIndex) {
-            // Find the word span that contains charIndex
             const match = offsetMap.find(
                 w => charIndex >= w.start && charIndex < w.end
             );
@@ -1097,7 +1330,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (lastHighlight) lastHighlight.classList.remove('narration-highlight');
                 match.el.classList.add('narration-highlight');
                 lastHighlight = match.el;
-                // Scroll the highlighted word into view inside the letter
                 match.el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
             }
         }
@@ -1109,7 +1341,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // ── UI helpers ────────────────────────────────────────────────────────
         function setStatus(key) {
             if (!statusEl) return;
             const lang = document.documentElement.getAttribute('lang') || 'en';
@@ -1117,7 +1348,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 reading  : { en: 'Reading…',   ar: 'يقرأ…'         },
                 paused   : { en: 'Paused',      ar: 'متوقف مؤقتًا'  },
                 stopped  : { en: '',            ar: ''               },
-                novoice  : { en: 'No Arabic voice found on this device — using default', ar: 'لا يوجد صوت عربي على هذا الجهاز — يُستخدم الصوت الافتراضي' },
+                novoice  : { en: 'Using online voice', ar: 'يُستخدم صوت عبر الإنترنت' },
             };
             statusEl.textContent = (map[key] || {})[lang] || '';
         }
@@ -1131,82 +1362,55 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!playing) setStatus('stopped');
         }
 
-        // ── Core speak ────────────────────────────────────────────────────────
         function startNarration() {
-            synth.cancel(); // clear any queued speech
+            SpeechPlayer.cancel();
 
             const lang    = document.documentElement.getAttribute('lang') || 'en';
             const text    = getLetterText(lang);
             if (!text) return;
 
-            // Wrap words for highlight (typewriter may have finished typing)
             wrapWordsForHighlight();
             offsetMap = buildOffsetMap();
 
-            // Pick voice
-            const langCode   = lang === 'ar' ? 'ar-SA' : 'en-US';
-            const altCode    = lang === 'ar' ? 'ar-EG' : 'en-GB';
-            let voice        = pickVoice(langCode) || pickVoice(altCode);
-            const usingFallback = (lang === 'ar' && voice && !voice.lang.toLowerCase().startsWith('ar'));
-            if (lang === 'ar' && !voice) {
-                setStatus('novoice');
-                return; // Can't narrate without any voice
+            if (typeof window._stopScrollNarration === 'function') {
+                window._stopScrollNarration();
             }
-            if (usingFallback) setStatus('novoice');
 
-            utterance      = new SpeechSynthesisUtterance(text);
-            utterance.lang  = langCode;
-            if (voice) utterance.voice = voice;
-            utterance.rate  = lang === 'ar' ? 0.88 : 0.92; // Slightly slower for Arabic
-            utterance.pitch = 1.0;
-
-            // Highlight word on boundary events
-            utterance.onboundary = function (e) {
-                if (e.name === 'word') highlightAt(e.charIndex);
-            };
-
-            utterance.onstart = function () {
-                setPlayingState(true, false);
-                setStatus('reading');
-            };
-
-            utterance.onend = function () {
-                clearHighlight();
-                setPlayingState(false, false);
-            };
-
-            utterance.onerror = function (e) {
-                if (e.error !== 'interrupted' && e.error !== 'canceled') {
-                    console.warn('SpeechSynthesis error:', e.error);
+            SpeechPlayer.speak(text, lang, 
+                () => {
+                    setPlayingState(true, false);
+                    setStatus(SpeechPlayer.useGoogleFallback ? 'novoice' : 'reading');
+                },
+                () => {
+                    clearHighlight();
+                    setPlayingState(false, false);
+                },
+                () => {
+                    clearHighlight();
+                    setPlayingState(false, false);
                 }
-                clearHighlight();
-                setPlayingState(false, false);
-            };
-
-            synth.speak(utterance);
+            );
         }
 
-        // ── Button handlers ───────────────────────────────────────────────────
         playBtn.addEventListener('click', function () {
             if (!isPlaying) {
-                // Fresh start (also acts as resume if browser supports it)
-                if (isPaused && synth.paused) {
-                    synth.resume();
+                if (isPaused) {
+                    SpeechPlayer.resume();
                     setPlayingState(true, false);
-                    setStatus('reading');
+                    setStatus(SpeechPlayer.useGoogleFallback ? 'novoice' : 'reading');
                 } else {
                     startNarration();
                 }
             } else {
                 // Pause
-                synth.pause();
+                SpeechPlayer.pause();
                 setPlayingState(true, true);
                 setStatus('paused');
             }
         });
 
         stopBtn.addEventListener('click', function () {
-            synth.cancel();
+            SpeechPlayer.cancel();
             clearHighlight();
             setPlayingState(false, false);
         });
@@ -1215,7 +1419,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (glassCard) {
             glassCard.addEventListener('click', function () {
                 if (!glassCard.classList.contains('open')) {
-                    synth.cancel();
+                    SpeechPlayer.cancel();
                     clearHighlight();
                     setPlayingState(false, false);
                 }
@@ -1224,12 +1428,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Stop narration when language toggles (new language = fresh start needed)
         window._stopNarration = function () {
-            synth.cancel();
+            SpeechPlayer.cancel();
             clearHighlight();
             setPlayingState(false, false);
-            if (typeof window._stopPreRecordedVoiceover === 'function') {
-                window._stopPreRecordedVoiceover();
-            }
         };
 
         // Expose for debugging
@@ -1488,8 +1689,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // --- Wishes Board Guestbook Setup ---
-    const initialWishes = [];
+    const initialWishes = [
+        { name: "Ayesha (Bestie)", message: "Happy 21st Milestone, Zoha! So grateful for all our late-night tea talks, study sessions, and endless laughter. You are an absolute star!" },
+        { name: "Mom & Dad", message: "Wishing our dearest Zoha a blessed and happy 21st birthday. May your life be filled with constant joy, peace, and endless success." },
+        { name: "Zain (Cousin)", message: "Happy Birthday! May your day be filled with warm celebrations and may all your code compile perfectly on the first run!" },
+        { name: "Yousef", message: "To an amazing friend, wishing you a fantastic 21st! Keep shining bright and dreaming big. Have an incredible year ahead!" }
+    ];
 
     function loadWishes() {
         // One-time clear of legacy mock wishes to start fresh
@@ -2104,36 +2309,99 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // --- Pre-recorded Arabic Voice-over Scroll Sync Manager ---
-    let activeNarrationAudio = null;
-
-    function fadeAudio(audio, targetVolume, duration, onComplete) {
-        if (!audio) return;
-        if (audio.fadeInterval) {
-            clearInterval(audio.fadeInterval);
-        }
-
-        const startVolume = audio.volume;
-        const diff = targetVolume - startVolume;
-        const stepTime = 20; // 50 steps per second (20ms interval)
-        const steps = duration / stepTime;
-        let currentStep = 0;
-
-        audio.fadeInterval = setInterval(() => {
-            currentStep++;
-            let nextVolume = startVolume + (diff * (currentStep / steps));
-            if (nextVolume < 0) nextVolume = 0;
-            if (nextVolume > 1) nextVolume = 1;
-            audio.volume = nextVolume;
-
-            if (currentStep >= steps) {
-                clearInterval(audio.fadeInterval);
-                audio.fadeInterval = null;
-                audio.volume = targetVolume;
-                if (onComplete) onComplete();
+    // --- Synthesized Scroll Narration Engine & Sync Manager ---
+    const ScrollSpeechPlayer = {
+        audioElement: null,
+        nativeUtterance: null,
+        isPlaying: false,
+        activeSectionId: null,
+        
+        speak: function(sectionId, text, lang) {
+            this.cancel();
+            
+            this.activeSectionId = sectionId;
+            this.isPlaying = true;
+            
+            const langCode = lang === 'ar' ? 'ar-SA' : 'en-US';
+            const altCode = lang === 'ar' ? 'ar-EG' : 'en-GB';
+            
+            let voice = pickVoice(langCode) || pickVoice(altCode);
+            const usingFallback = (lang === 'ar' && voice && !voice.lang.toLowerCase().startsWith('ar'));
+            const noArabicVoice = (lang === 'ar' && (!voice || usingFallback));
+            
+            duckBackgroundMusic();
+            
+            if (noArabicVoice || !('speechSynthesis' in window)) {
+                // Google TTS fallback
+                const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${lang}&client=tw-ob&q=${encodeURIComponent(text)}`;
+                this.audioElement = new Audio(url);
+                this.audioElement.volume = 1.0;
+                this.audioElement.addEventListener('ended', () => {
+                    this.isPlaying = false;
+                    unduckBackgroundMusic();
+                });
+                this.audioElement.play().catch(err => {
+                    console.warn("Scroll TTS autoplay failed:", err);
+                    this.isPlaying = false;
+                    unduckBackgroundMusic();
+                });
+            } else {
+                // Native SpeechSynthesis
+                this.nativeUtterance = new SpeechSynthesisUtterance(text);
+                this.nativeUtterance.lang = langCode;
+                if (voice) this.nativeUtterance.voice = voice;
+                this.nativeUtterance.rate = lang === 'ar' ? 0.9 : 0.95;
+                
+                this.nativeUtterance.onend = () => {
+                    this.isPlaying = false;
+                    unduckBackgroundMusic();
+                };
+                this.nativeUtterance.onerror = () => {
+                    this.isPlaying = false;
+                    unduckBackgroundMusic();
+                };
+                
+                synth.speak(this.nativeUtterance);
             }
-        }, stepTime);
-    }
+        },
+        
+        cancel: function() {
+            if (this.audioElement) {
+                this.audioElement.pause();
+                this.audioElement = null;
+            }
+            if (this.nativeUtterance && 'speechSynthesis' in window) {
+                synth.cancel();
+            }
+            this.isPlaying = false;
+            this.activeSectionId = null;
+            unduckBackgroundMusic();
+        }
+    };
+    
+    window._stopScrollNarration = function() {
+        ScrollSpeechPlayer.cancel();
+    };
+    window._stopPreRecordedVoiceover = window._stopScrollNarration; // Backward compatibility alias
+
+    const SECTION_TEXTS = {
+        'hero': {
+            en: "Happy 21st Birthday, Zoha! Celebrating a magical soul.",
+            ar: "عيد ميلاد سعيد الحادي والعشرون، زوها! نحتفل بروح ساحرة."
+        },
+        'card-section': {
+            en: "A Special Greeting. Tap the card below to open and reveal its contents.",
+            ar: "بطاقة تهنئة خاصة. اضغطي على البطاقة أدناه لفتحها وقراءة محتوياتها."
+        },
+        'timeline-section': {
+            en: "Our Friendship Story. A journey through our favorite milestones together.",
+            ar: "قصة صداقتنا. رحلة عبر أهم محطاتنا معًا."
+        },
+        'gift-section': {
+            en: "The Big Surprise. Tap the box below to claim your virtual birthday gift.",
+            ar: "المفاجأة الكبرى. اضغطي على الصندوق أدناه للحصول على هديتك الافتراضية."
+        }
+    };
 
     const narrationObserverOptions = {
         root: null,
@@ -2142,65 +2410,40 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const narrationObserver = new IntersectionObserver((entries) => {
-        // Find which audio elements correspond to the section IDs
-        const audioMap = {
-            'hero': 'narr-hero',
-            'card-section': 'narr-letter',
-            'timeline-section': 'narr-timeline',
-            'gift-section': 'narr-gift'
-        };
+        if (isMuted) {
+            ScrollSpeechPlayer.cancel();
+            return;
+        }
 
-        // Check if intro is dismissed and language is Arabic
-        const isArabic = document.documentElement.getAttribute('lang') === 'ar';
+        const lang = document.documentElement.getAttribute('lang') || 'en';
         const introOverlay = document.getElementById('intro-overlay');
         const isUnlocked = introOverlay ? (introOverlay.classList.contains('hidden') || introOverlay.style.display === 'none') : true;
 
-        if (!isArabic || !isUnlocked) {
-            // Stop any playing narration if requirements aren't met
-            if (activeNarrationAudio) {
-                const current = activeNarrationAudio;
-                fadeAudio(current, 0, 400, () => {
-                    current.pause();
-                    current.currentTime = 0;
-                });
-                activeNarrationAudio = null;
-            }
+        if (!isUnlocked) {
+            ScrollSpeechPlayer.cancel();
             return;
         }
 
         entries.forEach(entry => {
-            const audioId = audioMap[entry.target.id];
-            const targetAudio = document.getElementById(audioId);
-            if (!targetAudio) return;
+            const sectionId = entry.target.id;
+            const textDef = SECTION_TEXTS[sectionId];
+            if (!textDef) return;
 
             if (entry.isIntersecting) {
-                // Stop any other currently playing track
-                if (activeNarrationAudio && activeNarrationAudio !== targetAudio) {
-                    const oldAudio = activeNarrationAudio;
-                    fadeAudio(oldAudio, 0, 400, () => {
-                        oldAudio.pause();
-                    });
+                if (ScrollSpeechPlayer.isPlaying && ScrollSpeechPlayer.activeSectionId === sectionId) {
+                    return;
                 }
-
-                activeNarrationAudio = targetAudio;
-                targetAudio.muted = isMuted; // inherit global player mute state
-
-                // Fade in from 0
-                targetAudio.volume = 0;
-                targetAudio.play().then(() => {
-                    fadeAudio(targetAudio, 0.85, 400); // fade in to 85% volume
-                }).catch(err => {
-                    console.log("Failed to play section narration:", err);
-                });
+                
+                // Stop any active card narration first
+                if (typeof window._stopNarration === 'function') {
+                    window._stopNarration();
+                }
+                
+                const speakText = textDef[lang];
+                ScrollSpeechPlayer.speak(sectionId, speakText, lang);
             } else {
-                // Section left view — fade out and pause if it's the active track
-                if (activeNarrationAudio === targetAudio) {
-                    fadeAudio(targetAudio, 0, 400, () => {
-                        targetAudio.pause();
-                        if (activeNarrationAudio === targetAudio) {
-                            activeNarrationAudio = null;
-                        }
-                    });
+                if (ScrollSpeechPlayer.activeSectionId === sectionId) {
+                    ScrollSpeechPlayer.cancel();
                 }
             }
         });
@@ -2211,18 +2454,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const el = document.getElementById(id);
         if (el) narrationObserver.observe(el);
     });
-
-    // Unified stop pre-recorded voice-over bridge
-    window._stopPreRecordedVoiceover = function () {
-        if (activeNarrationAudio) {
-            const aud = activeNarrationAudio;
-            fadeAudio(aud, 0, 300, () => {
-                aud.pause();
-                aud.currentTime = 0;
-            });
-            activeNarrationAudio = null;
-        }
-    };
 
     // --- Scroll-Linked Parallax Effects (Lerped / Smoothed) ---
     const heroCard = document.getElementById('hero-glass-card');

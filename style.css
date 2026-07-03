@@ -1632,16 +1632,24 @@ html[dir="rtl"] .handwritten-signature-names {
 .wishes-board-container {
     height: 480px;
     overflow-y: auto;
-    padding-right: 15px;
+    padding-right: 12px;
     border-radius: var(--border-radius-md);
+    border: 1px solid rgba(243, 213, 200, 0.08);
+    background: rgba(20, 14, 23, 0.25);
+    box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.4);
+    padding: 15px;
 }
 
 .wishes-board-container::-webkit-scrollbar {
     width: 6px;
 }
 .wishes-board-container::-webkit-scrollbar-thumb {
-    background: var(--border-glass);
-    border-radius: 3px;
+    background: rgba(224, 168, 153, 0.45);
+    border-radius: 4px;
+}
+.wishes-board-container::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 4px;
 }
 
 .wishes-board {
@@ -1650,16 +1658,17 @@ html[dir="rtl"] .handwritten-signature-names {
     gap: 20px;
 }
 
-/* Sticky notes */
+/* Sticky notes with premium legibility */
 .wish-card {
-    background: linear-gradient(135deg, rgba(253, 213, 206, 0.12) 0%, rgba(224, 168, 153, 0.04) 100%);
-    border: 1px solid var(--border-glass);
-    padding: 1.5rem;
+    background: linear-gradient(135deg, rgba(35, 25, 39, 0.88) 0%, rgba(20, 14, 23, 0.94) 100%);
+    border: 1.5px solid rgba(243, 213, 200, 0.22);
+    padding: 1.8rem 1.5rem;
     border-radius: var(--border-radius-md);
-    box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+    box-shadow: 0 12px 24px rgba(0,0,0,0.45);
     position: relative;
-    backdrop-filter: blur(10px);
-    transition: all 0.3s ease;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    transition: all 0.3s cubic-bezier(0.165, 0.84, 0.44, 1);
 }
 
 .wish-card::before {
@@ -1675,21 +1684,23 @@ html[dir="rtl"] .handwritten-signature-names {
 }
 
 .wish-card-text {
-    font-size: 0.85rem;
-    color: var(--text-secondary);
+    font-size: 0.88rem;
+    color: var(--text-primary);
     margin-bottom: 1.2rem;
     position: relative;
     z-index: 2;
     font-style: italic;
+    line-height: 1.5;
 }
 
 .wish-card-author {
     font-family: var(--font-accent);
-    font-size: 0.75rem;
-    color: var(--rose-gold-medium);
-    text-align: right;
+    font-size: 0.8rem;
+    color: var(--rose-gold-light);
     font-weight: 600;
-    letter-spacing: 1px;
+    text-align: right;
+    position: relative;
+    z-index: 2;
 }
 
 .wish-card:hover {
@@ -2561,6 +2572,30 @@ select:focus {
         font-size: 0.72rem;
         margin-bottom: 0.6rem;
         line-height: 1.4;
+    }
+    
+    .wishes-board-container {
+        height: 380px;
+        padding: 10px;
+        padding-right: 5px;
+    }
+    
+    .wishes-board {
+        grid-template-columns: 1fr;
+        gap: 15px;
+    }
+    
+    .wish-card {
+        padding: 1.2rem 1rem;
+    }
+    
+    .wish-card-text {
+        font-size: 0.82rem;
+        margin-bottom: 0.8rem;
+    }
+    
+    .wish-card-author {
+        font-size: 0.75rem;
     }
 }
 
